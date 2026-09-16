@@ -1,0 +1,6 @@
+.azure/
+main.json
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
