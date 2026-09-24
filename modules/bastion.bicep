@@ -51,7 +51,7 @@ resource bastionHubConnection 'Microsoft.Network/virtualHubs/hubVirtualNetworkCo
     enableInternetSecurity: false
     routingConfiguration: {
       associatedRouteTable: { id: hub1PrivateRouteTableId }
-      propagatedRouteTables: { labels: ['Default', 'internet-only', 'private-only'], ids: [{ id: hub1DefaultRouteTableId }] }
+      propagatedRouteTables: { labels: ['default', 'internet-only', 'private-only'], ids: [{ id: hub1DefaultRouteTableId }] }
     }
   }
   dependsOn: [bastion]

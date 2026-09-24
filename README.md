@@ -1,81 +1,61 @@
 # Azure Virtual WAN BGP: Inter-Hub Spoke NVA Routing
 
-This Bicep lab recreates the four-spoke, one-branch Azure Virtual WAN topology using FRR NVA and native BGP.
+![Predecessor topology reference](image/vwan-interhub-spoke-azfw-reference-style.svg)
 
-## Routing Design
+*Topology reference from the predecessor lab. Its Azure Firewall labels and static protected-prefix routes do not represent this FRR/BGP deployment; use the routing details below for the current design.*
 
-Each region contains one protected Spoke 1 VNet, one directly connected Spoke 2 VNet, and two FRR NVAs in a dedicated transit VNet behind an internal Standard HA Ports load balancer.
+This Bicep lab demonstrates native Azure Virtual WAN BGP peering with Linux/FRR NVAs, protected and direct spokes, branch connectivity, and internet egress. It is a routing lab, not a stateful firewall deployment.
+
+## Architecture and Routing
+
+Each hub has one protected Spoke 1 VNet, one directly connected Spoke 2 VNet, and two FRR NVAs in a transit VNet behind an internal Standard HA Ports load balancer. Both hubs default to `westus3`.
 
 | Hub | Protected spoke | Direct spoke | NVA peers | NVA ASN | Advertised prefix | ILB frontend |
 |---|---|---|---|---|---|---|
 | Hub 1 | `hub1-spoke1` / `172.16.1.0/24` | `hub1-spoke2` / `172.16.2.0/24` | `172.16.10.4`, `172.16.10.5` | `65020` | `172.16.1.0/24` | `172.16.10.10` |
 | Hub 2 | `hub2-spoke1` / `172.16.3.0/24` | `hub2-spoke2` / `172.16.4.0/24` | `172.16.20.4`, `172.16.20.5` | `65020` | `172.16.3.0/24` | `172.16.20.10` |
 
-The deployment creates four native `Microsoft.Network/virtualHubs/bgpConnections` resources. Each virtual hub peers with both NVAs in its local transit VNet. FRR receives the virtual hub router IPs at deployment time and advertises only the local protected-spoke prefix.
+This is a **BGP-based NVA lab with static traffic-steering routes**, not a static-only lab:
 
-| Connection | Associated route table | Routing behavior |
-|---|---|---|
-| Protected Spoke 1 VNets | Not vHub-connected; peered to local NVA transit VNet | Workload subnet default UDR targets the local HA Ports frontend |
-| NVA transit VNet connections | Local `defaultRouteTable` | Carries the regional BGP peers and protected-spoke advertisement |
-| Direct Spoke 2 VNets | Local Virtual WAN route tables | Retains native vHub associations and propagations |
-| Branch VPN | Connected to both virtual hubs | ASN `65010`; four IPsec connections across redundant gateway instances |
-| Bastion VNet | Hub 1 private route table | Private routes with internet security disabled |
+- **BGP:** Each NVA peers with both local vHub router IPs and originates its protected-spoke prefix. Hub-to-protected-spoke traffic uses individual NVA BGP next hops, not static protected-prefix routes to the ILB.
+- **Spoke UDRs:** Protected spokes are not directly connected to a hub; they peer with their local transit VNet, allow forwarded traffic, and disable subnet BGP route propagation. Their `0.0.0.0/0` UDR targets the local ILB.
+- **Internet steering:** Direct spokes retain a static default through the local NVA connection to its ILB. Linux NAT and the transit-subnet NAT Gateway provide internet egress.
+- **Branch and management:** `branch1` (`10.100.0.0/16`, ASN `65010`) connects to both hubs using BGP/IPsec. Bastion connects through Hub 1's private route table with internet security disabled.
 
-Protected spoke subnets disable BGP route propagation and send `0.0.0.0/0` to the regional load-balancer frontend. Bidirectional VNet peerings allow forwarded traffic between each protected spoke and its NVA transit VNet. The shared `branch1` VNet (`10.100.0.0/16`) establishes BGP/IPsec connectivity to both virtual hubs.
+**Routing invariant:** Each NVA transit connection associates with the local `defaultRouteTable` and propagates to the same `default`, `internet-only`, and `private-only` labels as the VPN connection. Both default tables retain Azure's internal `default` label and also carry `private-only`, explicitly joining the cross-hub private-route propagation group.
 
-FRR enables IPv4 forwarding, disables reverse-path filtering, resolves multihop next hops through Azure's default route, preserves RFC1918 source addresses on private paths, performs NAT for internet traffic, assigns the ILB frontend `/32` to loopback, and serves the TCP health probe on port `8080`.
-
-**Selective cross-hub routing remains unresolved.** The source-equivalent TCP/22 matrix passed 16 of 20 directions. All four protected-Spoke1-to-remote-Spoke2 directions failed, matching the predecessor lab; all other branch, same-hub, protected-to-protected, and direct-Spoke2 paths passed.
-
-## Architecture
-
-The diagram shows the protected Spoke 1 VNets, dedicated NVA transit VNets, directly connected Spoke 2 VNets, and dual-connected branch.
-
-![Lab Architecture](image/vwan-interhub-spoke-azfw-reference-style.svg)
+The [FRR/Linux configuration](scripts/configure-frr-nva.sh) enables IPv4 forwarding, disables reverse-path filtering, resolves multihop next hops through Azure's default route, preserves private source addresses, NATs internet traffic, assigns the ILB frontend `/32` to loopback, and serves the TCP health probe on port `8080`.
 
 ## Prerequisites
 
-### Requirements
-
 - **PowerShell 7+** — Run the deployment script with `pwsh`. Windows PowerShell 5.1 is not supported.
-- **Azure Subscription** — An active Azure subscription with sufficient quota for the resources deployed
+- **Azure subscription** with sufficient quota for the resources deployed.
 - **RBAC role at subscription scope** — **Contributor** is sufficient; **Owner** also works. Resource-group-only access is not sufficient because the subscription-scoped template creates the resource group.
-- **Azure CLI with Bicep support** — The deployment script invokes `az deployment sub create`
+- **Azure CLI with Bicep support** — The deployment script invokes `az deployment sub create`.
 - Logged in to Azure CLI. When deploying to another tenant, specify its tenant ID or verified domain during login:
   ```powershell
   az login --tenant "<TENANT_ID_OR_DOMAIN>"
   ```
-
-### Required Resource Providers
-
-The subscription must have these resource providers registered:
-
-- `Microsoft.Network`
-- `Microsoft.Compute`
+- Register the **`Microsoft.Network`** and **`Microsoft.Compute`** resource providers.
 
 The default deployment includes nine Linux VMs, two `/22` virtual hubs, two virtual hub VPN gateways, one branch VPN gateway, two internal load balancers, and one Standard Bastion host.
 
-## Getting Started
+## Deploy
 
-### Clone the Repository
+Clone the repository:
 
 ```powershell
 git clone https://github.com/colinweiner111/azure-vwan-interregion-nva-bgp-routing-lab.git
 cd azure-vwan-interregion-nva-bgp-routing-lab
 ```
 
-## Deployment
-
-Use the PowerShell deployment script:
+Run from PowerShell 7, replacing the subscription ID and choosing a **new** resource-group name:
 
 ```powershell
-.\deploy-bicep.ps1 -SubscriptionId <subscription-id> -ResourceGroupName <your-rg-name> -Location westus3 -Location2 centralus
+.\deploy-bicep.ps1 -SubscriptionId "<subscription-id>" -ResourceGroupName "vwan-interregion-nva-bgp-test01"
 ```
 
-Example:
-```powershell
-.\deploy-bicep.ps1 -SubscriptionId 00000000-0000-0000-0000-000000000000 -ResourceGroupName vwan-interregion-nva-bgp-test01 -Location westus3 -Location2 centralus
-```
+This uses `westus3` for both hubs. To deploy hubs in different regions, specify a second region, for example `-Location2 centralus`.
 
 The script will:
 1. Select and verify the exact subscription supplied with `-SubscriptionId`
@@ -85,67 +65,33 @@ The script will:
 
 > **Use a fresh resource group.** `-ResumeExisting` is only for a deliberately reviewed, isolated deployment created from this lab. Never target the source lab or an unrelated resource group.
 
-## Default Configuration
+### Defaults
 
-- **Username**: `azureuser`
-- **Password**: Prompted during deployment (set a strong password)
-- **Regions**: Both hubs in `westus3` by default; pass `-Location2 centralus` for an inter-region deployment
-- **VM Size**: `Standard_D2ls_v7`
-- **NVA ASN**: `65020`
-- **Branch ASN**: `65010`
-- **vHub ASN**: `65515`
-- **VPN pre-shared key**: Prompted during deployment
-
-## Validation
-
-The configuration passed local Bicep compilation, compiled-template routing checks, deployment to `vwan-interregion-nva-bgp-lab-v3`, FRR and VPN control-plane checks, a complete TCP/22 and internet test, and single-NVA failover.
-
-### Intra-hub paths
-
-| Path | Result |
+| Setting | Value |
 |---|---|
-| Hub 1 Spoke 1 -> NVA -> Hub 1 -> Hub 1 Spoke 2 | PASS |
-| Hub 1 Spoke 2 -> Hub 1 -> NVA -> Hub 1 Spoke 1 | PASS |
-| Hub 2 Spoke 1 -> NVA -> Hub 2 -> Hub 2 Spoke 2 | PASS |
-| Hub 2 Spoke 2 -> Hub 2 -> NVA -> Hub 2 Spoke 1 | PASS |
+| VM username / size | `azureuser` / `Standard_D2ls_v7` |
+| Hub regions | `westus3` / `westus3` |
+| NVA / branch / vHub ASN | `65020` / `65010` / `65515` |
+| VM password / VPN pre-shared key | Prompted securely during deployment |
 
-### Branch paths
+## Validate
 
-| Path | Result |
-|---|---|
-| Branch -> Hub 1 protected and direct spokes | PASS |
-| Hub 1 protected and direct spokes -> Branch | PASS |
-| Branch -> Hub 2 protected and direct spokes | PASS |
-| Hub 2 protected and direct spokes -> Branch | PASS |
+Run local Bicep compilation and compiled-template routing regression checks with:
 
-### Inter-hub paths
+```powershell
+pwsh -File .\tests\Test-Routing.ps1
+```
 
-| Path | Result |
-|---|---|
-| Hub 1 protected Spoke 1 <-> Hub 2 protected Spoke 1 | PASS |
-| Hub 1 direct Spoke 2 <-> Hub 2 direct Spoke 2 | PASS |
-| Hub 1 protected Spoke 1 <-> Hub 2 direct Spoke 2 | FAIL |
-| Hub 2 protected Spoke 1 <-> Hub 1 direct Spoke 2 | FAIL |
+These checks verify NVA/VPN propagation alignment, default-table association, absence of protected-prefix static overrides, and preservation of the local internet defaults. They do not test Azure route convergence or connectivity.
 
-### Internet paths
-
-| Path | Result |
-|---|---|
-| Hub 1 protected and direct spokes -> internet | PASS |
-| Hub 2 protected and direct spokes -> internet | PASS |
-
-### NVA failover
-
-Stopping `hub1-nva1` left both BGP sessions on `hub1-nva2` established. Hub 1 protected-spoke traffic to the branch, local direct spoke, and internet continued successfully. After restoration, both BGP sessions on `hub1-nva1` returned to `Established`.
-
-Successful connectivity alone does not prove the intended NVA path. Correlate effective routes, BGP learned and advertised routes, load-balancer health, FRR state, and packet or flow evidence before claiming symmetry or failover.
+Private traffic may use different NVAs in each direction; this is expected for stateless FRR forwarding.
 
 ## Credits & Source
 
 - Daniel Mauser, [`inter-region-nvabgp`](https://github.com/dmauser/azure-virtualwan/tree/main/inter-region-nvabgp) — architecture inspiration.
-- The predecessor Virtual WAN lab — repository structure, deployment safeguards, README format, and source diagram style.
+- The predecessor Virtual WAN lab — repository structure, deployment safeguards, and source diagram style.
 - [BGP peering with a Virtual WAN hub](https://learn.microsoft.com/azure/virtual-wan/scenario-bgp-peering-hub) — Microsoft documentation.
 
 ---
 
-© MIT Licensed. See `LICENSE`.
+© MIT Licensed. See [LICENSE](LICENSE).

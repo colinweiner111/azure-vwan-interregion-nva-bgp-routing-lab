@@ -93,9 +93,70 @@ Assert-Condition ($bgpJson -match 'hubVirtualNetworkConnection' -and $bgpJson -m
 Assert-Condition ($bgpJson -match '65020') 'NVA BGP peers use ASN 65020'
 
 $routingJson = $routing | ConvertTo-Json -Depth 100 -Compress
-Assert-Condition ((Get-ResourcesByType $routing 'Microsoft.Network/virtualHubs/hubVirtualNetworkConnections').Count -eq 4) 'Routing module creates two NVA and two direct-spoke hub connections'
-Assert-Condition ((Get-ResourcesByType $routing 'Microsoft.Network/virtualHubs/hubRouteTables').Count -eq 5) 'Source-shaped hub route tables are preserved'
-Assert-Condition ($routingJson -match 'hub1NvaLoadBalancerIp' -and $routingJson -match 'hub2NvaLoadBalancerIp') 'Protected and internet routes target regional NVA ILB parameters'
+$hubConnections = Get-ResourcesByType $routing 'Microsoft.Network/virtualHubs/hubVirtualNetworkConnections'
+$hubRouteTables = Get-ResourcesByType $routing 'Microsoft.Network/virtualHubs/hubRouteTables'
+Assert-Condition ($hubConnections.Count -eq 4) 'Routing module creates two NVA and two direct-spoke hub connections'
+Assert-Condition ($hubRouteTables.Count -eq 5) 'Source-shaped hub route tables are preserved'
+Assert-Condition ($routingJson -match 'hub1NvaLoadBalancerIp' -and $routingJson -match 'hub2NvaLoadBalancerIp') 'Internet routes target regional NVA ILB parameters'
+Assert-Condition ($routingJson -notmatch 'Hub1Spoke1ViaNvaConnection|Hub2Spoke1ViaNvaConnection') 'Protected prefixes are not shadowed by cross-hub static routes'
+Assert-Condition ($routingJson -notmatch 'noneRouteTable') 'NVA BGP routes do not propagate to None'
+$expectedPropagationLabels = @('default', 'internet-only', 'private-only')
+$nvaConnections = @($hubConnections | Where-Object { $_.name -match 'nva-transit-conn' })
+Assert-Condition ($nvaConnections.Count -eq 2) 'Both NVA transit connections are checked'
+foreach ($nvaConnection in $nvaConnections) {
+    $actualLabels = @($nvaConnection.properties.routingConfiguration.propagatedRouteTables.labels)
+    Assert-Condition (($actualLabels -join ',') -ceq ($expectedPropagationLabels -join ',')) "NVA connection $($nvaConnection.name) propagates to the VPN route-table labels"
+    $staticRoutes = @($nvaConnection.properties.routingConfiguration.vnetRoutes.staticRoutes)
+    Assert-Condition ($staticRoutes.Count -eq 1 -and (@($staticRoutes[0].addressPrefixes) -join ',') -eq '0.0.0.0/0') "NVA connection $($nvaConnection.name) leaves protected-prefix next hops to BGP, not static ILB routes"
+}
+foreach ($routeTable in $hubRouteTables) {
+    $staticRoutes = @($routeTable.properties.routes)
+    if ($routeTable.name -match 'internetOnlyRouteTable') {
+        Assert-Condition ($staticRoutes.Count -eq 1 -and (@($staticRoutes[0].destinations) -join ',') -eq '0.0.0.0/0') "Internet route table $($routeTable.name) contains only the internet default"
+    }
+    else {
+        Assert-Condition ($staticRoutes.Count -eq 0) "Hub route table $($routeTable.name) has no static overrides of learned routes"
+    }
+}
+$defaultRouteTables = @($hubRouteTables | Where-Object { $_.name -match 'defaultRouteTable' })
+Assert-Condition ($defaultRouteTables.Count -eq 2) 'Both virtual hubs define a default route table'
+foreach ($defaultRouteTable in $defaultRouteTables) {
+    Assert-Condition ((@($defaultRouteTable.properties.labels) -join ',') -ceq 'default,private-only') "Hub route table $($defaultRouteTable.name) preserves the internal default label and joins cross-hub private propagation"
+}
+
+$vpnConnections = Get-ResourcesByType $vpn 'Microsoft.Network/vpnGateways/vpnConnections'
+Assert-Condition ($vpnConnections.Count -eq 2) 'Both VPN propagation policies are checked'
+foreach ($hubIndex in 1..2) {
+    $nvaConnection = @($nvaConnections | Where-Object { $_.name -match "hub$hubIndex-nva-transit-conn" })[0]
+    $defaultRouteTableId = "[resourceId('Microsoft.Network/virtualHubs/hubRouteTables', parameters('hub${hubIndex}Name'), 'defaultRouteTable')]"
+    $configuration = $nvaConnection.properties.routingConfiguration
+    Assert-Condition ($configuration.associatedRouteTable.id -eq $defaultRouteTableId) "Hub $hubIndex NVA associates with its local default table"
+    Assert-Condition ((@($configuration.propagatedRouteTables.ids.id) -join ',') -eq $defaultRouteTableId) "Hub $hubIndex NVA propagates explicitly to its local default table"
+    $internetRouteTable = @($hubRouteTables | Where-Object { $_.name -match "hub${hubIndex}Name" -and $_.name -match 'internetOnlyRouteTable' })[0]
+    Assert-Condition ($internetRouteTable.properties.routes[0].nextHop -eq "[variables('hub${hubIndex}NvaConnectionId')]") "Hub $hubIndex internet default uses only the local NVA connection"
+    Assert-Condition ($configuration.vnetRoutes.staticRoutes[0].nextHopIpAddress -eq "[parameters('hub${hubIndex}NvaLoadBalancerIp')]") "Hub $hubIndex connection internet default uses its local ILB"
+}
+foreach ($vpnConnection in $vpnConnections) {
+    $actualLabels = @($vpnConnection.properties.routingConfiguration.propagatedRouteTables.labels)
+    Assert-Condition (($actualLabels -join ',') -ceq ($expectedPropagationLabels -join ',')) "VPN connection $($vpnConnection.name) shares the NVA propagation labels"
+}
+foreach ($directConnection in @($hubConnections | Where-Object { $_.name -match 'spoke2-conn' })) {
+    Assert-Condition ($directConnection.properties.routingConfiguration.associatedRouteTable.id -match 'internetOnlyRouteTable') "Direct spoke $($directConnection.name) consumes the table receiving protected BGP prefixes"
+    Assert-Condition ((@($directConnection.properties.routingConfiguration.propagatedRouteTables.labels) -join ',') -ceq ($expectedPropagationLabels -join ',')) "Direct spoke $($directConnection.name) propagates return routes to both hubs"
+}
+$bastionConnections = Get-ResourcesByType $deployments['bastion-deployment'] 'Microsoft.Network/virtualHubs/hubVirtualNetworkConnections'
+Assert-Condition ($bastionConnections.Count -eq 1) 'Bastion propagation policy is checked'
+$propagatingConnections = @($hubConnections) + @($vpnConnections) + @($bastionConnections)
+$tableLabels = @($hubRouteTables | ForEach-Object { $_.properties.labels })
+foreach ($connection in $propagatingConnections) {
+    $labels = @($connection.properties.routingConfiguration.propagatedRouteTables.labels)
+    Assert-Condition (($labels -join ',') -ceq ($expectedPropagationLabels -join ',')) "Connection $($connection.name) uses the complete propagation label set"
+    foreach ($label in $labels) {
+        Assert-Condition ($tableLabels -ccontains $label) "Propagation label '$label' on $($connection.name) exactly matches a deployed table label"
+    }
+}
+Assert-Condition ((@($bgp.variables.advertisedPrefixes) -join ',') -eq '172.16.1.0/24,172.16.3.0/24') 'BGP advertises both protected-spoke prefixes in hub order'
+Assert-Condition ($bgpJson -match "advertisedPrefixes.*hubIndex") 'FRR receives the local protected prefix for each hub'
 
 $vpnJson = $vpn | ConvertTo-Json -Depth 100 -Compress
 Assert-Condition ((Get-ResourcesByType $vpn 'Microsoft.Network/virtualNetworkGateways').Count -eq 1) 'One branch VPN gateway is generated'

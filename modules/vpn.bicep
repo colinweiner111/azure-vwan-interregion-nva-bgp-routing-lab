@@ -75,7 +75,7 @@ resource hub1BranchConn 'Microsoft.Network/vpnGateways/vpnConnections@2023-11-01
     enableInternetSecurity: true
     routingConfiguration: {
       associatedRouteTable: { id: hub1DefaultRouteTableId }
-      propagatedRouteTables: { labels: ['Default', 'internet-only', 'private-only'], ids: [{ id: hub1DefaultRouteTableId }] }
+      propagatedRouteTables: { labels: ['default', 'internet-only', 'private-only'], ids: [{ id: hub1DefaultRouteTableId }] }
     }
     vpnLinkConnections: [{ name: 'link1', properties: { vpnSiteLink: { id: '${vpnSite.id}/vpnSiteLinks/link1' }, sharedKey: vpnSharedKey, enableBgp: true } }]
   }
@@ -88,7 +88,7 @@ resource hub2BranchConn 'Microsoft.Network/vpnGateways/vpnConnections@2023-11-01
     enableInternetSecurity: true
     routingConfiguration: {
       associatedRouteTable: { id: hub2DefaultRouteTableId }
-      propagatedRouteTables: { labels: ['Default', 'internet-only', 'private-only'], ids: [{ id: hub2DefaultRouteTableId }] }
+      propagatedRouteTables: { labels: ['default', 'internet-only', 'private-only'], ids: [{ id: hub2DefaultRouteTableId }] }
     }
     vpnLinkConnections: [{ name: 'link1', properties: { vpnSiteLink: { id: '${vpnSite.id}/vpnSiteLinks/link1' }, sharedKey: vpnSharedKey, enableBgp: true } }]
   }
