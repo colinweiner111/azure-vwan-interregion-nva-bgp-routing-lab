@@ -95,8 +95,6 @@ module routing 'modules/routing.bicep' = {
     hub2NvaVnetId: nva.outputs.hub2NvaVnetId
     hub1NvaLoadBalancerIp: nva.outputs.hub1LoadBalancerIp
     hub2NvaLoadBalancerIp: nva.outputs.hub2LoadBalancerIp
-    spoke1Hub1Prefixes: network.outputs.spoke1Hub1Prefixes
-    spoke1Hub2Prefixes: network.outputs.spoke1Hub2Prefixes
     spoke2Hub1Id: network.outputs.spoke2Hub1Id
     spoke2Hub2Id: network.outputs.spoke2Hub2Id
   }
