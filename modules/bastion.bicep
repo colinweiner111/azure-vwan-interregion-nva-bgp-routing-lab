@@ -1,6 +1,7 @@
 param location string
 param hub1Id string
 param bastionVnetId string
+param bastionSubnetPrefix string
 param hub1PrivateRouteTableId string
 param hub1DefaultRouteTableId string
 
@@ -26,7 +27,7 @@ resource hub1 'Microsoft.Network/virtualHubs@2023-11-01' existing = { name: last
 resource bastionSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = {
   parent: bastionVnet
   name: 'AzureBastionSubnet'
-  properties: { addressPrefix: '10.200.0.0/26', networkSecurityGroup: { id: bastionNsg.id } }
+  properties: { addressPrefix: bastionSubnetPrefix, networkSecurityGroup: { id: bastionNsg.id } }
 }
 resource bastionPip 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
   name: 'Bastion-PIP'

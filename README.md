@@ -8,7 +8,7 @@ This Bicep lab demonstrates native Azure Virtual WAN BGP peering with Linux/FRR 
 
 ## Architecture and Routing
 
-Each hub has one protected Spoke 1 VNet, one directly connected Spoke 2 VNet, and two FRR NVAs in a transit VNet behind an internal Standard HA Ports load balancer. Both hubs default to `westus3`.
+Each hub has one protected Spoke 1 VNet, one directly connected Spoke 2 VNet, and two FRR NVAs in a transit VNet behind an internal Standard HA Ports load balancer. You must explicitly specify the region for each hub.
 
 | Hub | Protected spoke | Direct spoke | NVA peers | NVA ASN | Advertised prefix | ILB frontend |
 |---|---|---|---|---|---|---|
@@ -21,6 +21,12 @@ This is a **BGP-based NVA lab with static traffic-steering routes**, not a stati
 - **Spoke UDRs:** Protected spokes are not directly connected to a hub; they peer with their local transit VNet, allow forwarded traffic, and disable subnet BGP route propagation. Their `0.0.0.0/0` UDR targets the local ILB.
 - **Internet steering:** Direct spokes retain a static default through the local NVA connection to its ILB. Linux NAT and the transit-subnet NAT Gateway provide internet egress.
 - **Branch and management:** `branch1` (`10.100.0.0/16`, ASN `65010`) connects to both hubs using BGP/IPsec. Bastion connects through Hub 1's private route table with internet security disabled.
+
+### Management Access
+
+Azure Bastion is the only permitted inbound SSH path to the five workload VMs. Their NSGs allow TCP/22 only from `AzureBastionSubnet` (`10.200.0.0/26`) and explicitly deny SSH from every other source.
+
+The workload and NVA VM NICs do not have public IP addresses, so direct SSH to a VM public IP is unavailable. Existing public IP resources remain for Azure Bastion, the branch VPN gateway, and the two NVA subnet NAT Gateways; the NAT Gateway public IPs provide NVA and protected-spoke Internet egress.
 
 **Routing invariant:** Each NVA transit connection associates with the local `defaultRouteTable` and propagates to the same `default`, `internet-only`, and `private-only` labels as the VPN connection. Both default tables retain Azure's internal `default` label and also carry `private-only`, explicitly joining the cross-hub private-route propagation group.
 
@@ -52,10 +58,12 @@ cd azure-vwan-interregion-nva-bgp-routing-lab
 Run from PowerShell 7, replacing the subscription ID and choosing a **new** resource-group name:
 
 ```powershell
-.\deploy-bicep.ps1 -SubscriptionId "<subscription-id>" -ResourceGroupName "vwan-interregion-nva-bgp-test01"
+.\deploy-bicep.ps1 -SubscriptionId "<subscription-id>" -ResourceGroupName "vwan-interregion-nva-bgp-test01" -Location westus3 -Location2 centralus
 ```
 
-This uses `westus3` for both hubs. To deploy hubs in different regions, specify a second region, for example `-Location2 centralus`.
+Both `-Location` (Hub 1) and `-Location2` (Hub 2) are required; neither has a default. This example uses `westus3` and `centralus`. You can explicitly supply the same region for both hubs if desired.
+
+For direct Bicep deployments, supply both `region1` and `region2`. Using [main.bicepparam](main.bicepparam) directly requires `VWAN_NVA_BGP_REGION_1` and `VWAN_NVA_BGP_REGION_2`; the PowerShell wrapper sets them from your arguments.
 
 The script will:
 1. Select and verify the exact subscription supplied with `-SubscriptionId`
@@ -63,14 +71,14 @@ The script will:
 3. Deploy the subscription-scoped Bicep template, which creates the resource group
 4. Prompt securely for the VM admin password and VPN pre-shared key if not provided
 
-> **Use a fresh resource group.** `-ResumeExisting` is only for a deliberately reviewed, isolated deployment created from this lab. Never target the source lab or an unrelated resource group.
+> **Use a new resource group.** Use `-ResumeExisting` only when intentionally updating an existing deployment of this lab; never target an unrelated resource group.
 
-### Defaults
+### Configuration
 
 | Setting | Value |
 |---|---|
 | VM username / size | `azureuser` / `Standard_D2ls_v7` |
-| Hub regions | `westus3` / `westus3` |
+| Hub regions | Required: `-Location` / `-Location2` (no defaults) |
 | NVA / branch / vHub ASN | `65020` / `65010` / `65515` |
 | VM password / VPN pre-shared key | Prompted securely during deployment |
 
@@ -82,7 +90,17 @@ Run local Bicep compilation and compiled-template routing regression checks with
 pwsh -File .\tests\Test-Routing.ps1
 ```
 
-These checks verify NVA/VPN propagation alignment, default-table association, absence of protected-prefix static overrides, and preservation of the local internet defaults. They do not test Azure route convergence or connectivity.
+These checks verify NVA/VPN propagation alignment, default-table association, absence of protected-prefix static overrides, preservation of the local internet defaults, and the Bastion-only SSH policy.
+
+After deployment, run the private connectivity matrix with:
+
+```powershell
+pwsh -File .\tests\Test-Connectivity.ps1 `
+  -SubscriptionId "<subscription-id>" `
+  -ResourceGroupName "<resource-group-name>"
+```
+
+The test starts bounded TCP listeners on port `2222`, checks all 20 directional workload paths three times, verifies east-west TCP/22 is blocked, tests HTTPS egress from all four spokes, and removes the listeners. TCP/2222 is allowed only among the five private workload subnets; it is not an SSH or Internet management path.
 
 Private traffic may use different NVAs in each direction; this is expected for stateless FRR forwarding.
 

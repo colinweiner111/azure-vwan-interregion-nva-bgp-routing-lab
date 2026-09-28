@@ -27,9 +27,16 @@ $frrText = Get-Content (Join-Path $root 'scripts/configure-frr-nva.sh') -Raw
 $nvaText = Get-Content (Join-Path $root 'modules/nva.bicep') -Raw
 $bgpText = Get-Content (Join-Path $root 'modules/bgp.bicep') -Raw
 $wrapperText = Get-Content (Join-Path $root 'deploy-bicep.ps1') -Raw
+$connectivityText = Get-Content (Join-Path $PSScriptRoot 'Invoke-ConnectivityChecks.sh') -Raw
+$listenerText = Get-Content (Join-Path $PSScriptRoot 'Start-ConnectivityListener.sh') -Raw
 
 Assert-Condition ($template.parameters.adminPassword.type -eq 'securestring') 'VM password is a secure parameter'
 Assert-Condition ($template.parameters.vpnSharedKey.type -eq 'securestring') 'VPN key is a secure parameter'
+foreach ($regionName in 'region1', 'region2') {
+    $regionParameter = $template.parameters.$regionName
+    Assert-Condition ($regionParameter.type -eq 'string' -and $regionParameter.PSObject.Properties.Name -notcontains 'defaultValue') "Bicep requires an explicit $regionName"
+    Assert-Condition ($regionParameter.minLength -eq 1) "Bicep rejects an empty $regionName"
+}
 Assert-Condition ($compiledText -notmatch 'Microsoft.Network/azureFirewalls|Microsoft.Network/firewallPolicies|routingIntent') 'No Azure Firewall, firewall policy, or Routing Intent resources'
 
 $moduleOrder = @(
@@ -60,6 +67,7 @@ $vpn = $deployments['vpn-deployment']
 $routing = $deployments['routing-deployment']
 $bgp = $deployments['bgp-connections-deployment']
 $vms = $deployments['vms-deployment']
+$bastion = $deployments['bastion-deployment']
 
 foreach ($literal in @(
     'hub1', 'hub2', '192.168.0.0/22', '192.168.4.0/22',
@@ -71,6 +79,52 @@ foreach ($literal in @(
 }
 Assert-Condition (@(Get-ResourcesByType $network 'Microsoft.Network/virtualNetworks' | Where-Object { $null -ne $_.properties }).Count -eq 6) 'Network module creates four spokes, one branch, and one Bastion VNet'
 Assert-Condition ((Get-ResourcesByType $network 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings').Count -eq 4) 'Protected spokes have four bidirectional NVA peerings'
+$bastionSubnetPrefix = $network.variables.bastionSubnetPrefix
+Assert-Condition ($bastionSubnetPrefix -eq '10.200.0.0/26') 'AzureBastionSubnet uses the expected prefix'
+$workloadNsgs = Get-ResourcesByType $network 'Microsoft.Network/networkSecurityGroups'
+Assert-Condition ($workloadNsgs.Count -eq 2) 'Both regional workload NSGs are checked'
+$expectedValidationSources = @('10.100.0.0/24', '172.16.1.0/27', '172.16.2.0/27', '172.16.3.0/27', '172.16.4.0/27')
+Assert-Condition ((@($network.variables.labValidationSourcePrefixes) -join ',') -eq ($expectedValidationSources -join ',')) 'TCP validation sources are limited to the five workload subnets'
+foreach ($workloadNsg in $workloadNsgs) {
+    $sshAllowRules = @($workloadNsg.properties.securityRules | Where-Object {
+        $_.properties.direction -eq 'Inbound' -and
+        $_.properties.access -eq 'Allow' -and
+        $_.properties.destinationPortRange -eq '22'
+    })
+    Assert-Condition ($sshAllowRules.Count -eq 1) "Workload NSG $($workloadNsg.name) has exactly one inbound SSH allow rule"
+    Assert-Condition ($sshAllowRules[0].properties.sourceAddressPrefix -eq "[variables('bastionSubnetPrefix')]") "Workload NSG $($workloadNsg.name) allows SSH only from AzureBastionSubnet"
+    $sshDenyRules = @($workloadNsg.properties.securityRules | Where-Object {
+        $_.properties.direction -eq 'Inbound' -and
+        $_.properties.access -eq 'Deny' -and
+        $_.properties.destinationPortRange -eq '22'
+    })
+    Assert-Condition ($sshDenyRules.Count -eq 1 -and $sshDenyRules[0].properties.sourceAddressPrefix -eq '*') "Workload NSG $($workloadNsg.name) denies SSH from every other source"
+    Assert-Condition (-not (@($workloadNsg.properties.securityRules).name -contains 'allow-lab-ssh-tests')) "Workload NSG $($workloadNsg.name) removes the intra-lab SSH exception"
+    $validationRules = @($workloadNsg.properties.securityRules | Where-Object {
+        $_.properties.direction -eq 'Inbound' -and
+        $_.properties.access -eq 'Allow' -and
+        $_.properties.destinationPortRange -eq '2222'
+    })
+    Assert-Condition ($validationRules.Count -eq 1 -and $validationRules[0].name -eq 'allow-lab-validation') "Workload NSG $($workloadNsg.name) has one dedicated TCP validation rule"
+    Assert-Condition ($validationRules[0].properties.sourceAddressPrefixes -eq "[variables('labValidationSourcePrefixes')]") "Workload NSG $($workloadNsg.name) limits TCP validation to private workload subnets"
+}
+
+$bastionSubnet = @(Get-ResourcesByType $bastion 'Microsoft.Network/virtualNetworks/subnets')[0]
+Assert-Condition ($bastionSubnet.name -match 'AzureBastionSubnet' -and $bastionSubnet.properties.addressPrefix -eq "[parameters('bastionSubnetPrefix')]") 'Bastion deployment consumes the shared AzureBastionSubnet prefix'
+$bastionNsg = @(Get-ResourcesByType $bastion 'Microsoft.Network/networkSecurityGroups')[0]
+$requiredBastionRules = @(
+    'AllowHttpsInbound',
+    'AllowGatewayManagerInbound',
+    'AllowBastionHostCommunication',
+    'AllowSshRdpOutbound',
+    'AllowAzureCloudOutbound',
+    'AllowBastionCommunication',
+    'AllowGetSessionInformation'
+)
+Assert-Condition ($bastionNsg.properties.securityRules.Count -eq $requiredBastionRules.Count) 'Bastion NSG retains only its required rules'
+foreach ($ruleName in $requiredBastionRules) {
+    Assert-Condition (@($bastionNsg.properties.securityRules).name -contains $ruleName) "Bastion NSG retains $ruleName"
+}
 
 $nvaJson = $nva | ConvertTo-Json -Depth 100 -Compress
 foreach ($literal in @('172.16.10.0/24', '172.16.20.0/24', '172.16.10.4', '172.16.10.5', '172.16.20.4', '172.16.20.5', '172.16.10.10', '172.16.20.10')) {
@@ -79,7 +133,7 @@ foreach ($literal in @('172.16.10.0/24', '172.16.20.0/24', '172.16.10.4', '172.1
 Assert-Condition ((Get-ResourcesByType $nva 'Microsoft.Network/virtualNetworks')[0].copy.count -eq '[length(range(0, 2))]') 'Two NVA transit VNets are generated'
 Assert-Condition ((Get-ResourcesByType $nva 'Microsoft.Network/natGateways')[0].copy.count -eq '[length(range(0, 2))]') 'Two NVA NAT gateways provide bootstrap egress'
 Assert-Condition ((Get-ResourcesByType $nva 'Microsoft.Network/publicIPAddresses')[0].copy.count -eq '[length(range(0, 2))]') 'Two NVA NAT public IPs are generated'
-Assert-Condition ($nvaJson -match 'natGateway') 'Each NVA subnet references its regional NAT gateway'
+Assert-Condition ($nvaJson -match 'natGateway' -and $nvaJson -match 'publicIpAddresses') 'Each NVA subnet retains its regional NAT gateway and public IP association'
 Assert-Condition ((Get-ResourcesByType $nva 'Microsoft.Network/loadBalancers')[0].copy.count -eq '[length(range(0, 2))]') 'Two NVA load balancers are generated'
 Assert-Condition ((Get-ResourcesByType $nva 'Microsoft.Compute/virtualMachines')[0].copy.count -eq "[length(variables('nvaInstances'))]") 'Four NVA VM instances use the four-element instance array'
 Assert-Condition ($nvaJson -match '"protocol":"All"' -and $nvaJson -match '"frontendPort":0' -and $nvaJson -match '"backendPort":0') 'Internal load balancers use HA Ports'
@@ -161,6 +215,7 @@ Assert-Condition ($bgpJson -match "advertisedPrefixes.*hubIndex") 'FRR receives 
 $vpnJson = $vpn | ConvertTo-Json -Depth 100 -Compress
 Assert-Condition ((Get-ResourcesByType $vpn 'Microsoft.Network/virtualNetworkGateways').Count -eq 1) 'One branch VPN gateway is generated'
 Assert-Condition ((Get-ResourcesByType $vpn 'Microsoft.Network/vpnGateways').Count -eq 2) 'Two virtual hub VPN gateways are generated'
+Assert-Condition ((Get-ResourcesByType $vpn 'Microsoft.Network/publicIPAddresses').Count -eq 1) 'Branch VPN gateway public IP is preserved'
 Assert-Condition ((Get-ResourcesByType $vpn 'Microsoft.Network/connections')[0].copy.count -eq '[length(range(0, 4))]') 'Branch creates four IPsec connections across both hubs'
 Assert-Condition ($vpnJson -match '65010' -and $vpnJson -match '"enableBgp":true') 'Branch VPN uses ASN 65010 with BGP enabled'
 
@@ -168,6 +223,10 @@ $expectedVmNames = @('branch1-vm', 'hub1-spoke1-vm', 'hub1-spoke2-vm', 'hub2-spo
 Assert-Condition ((Get-ResourcesByType $vms 'Microsoft.Compute/virtualMachines')[0].copy.count -eq '[length(range(0, 5))]') 'Exactly five workload VM instances are generated'
 Assert-Condition ((Get-ResourcesByType $vms 'Microsoft.Network/networkInterfaces')[0].copy.count -eq '[length(range(0, 5))]') 'Exactly five workload NIC instances are generated'
 Assert-Condition ((@($vms.variables.vmNames) -join ',') -eq ($expectedVmNames -join ',')) 'Workload VM names match the predecessor topology'
+Assert-Condition (($vms | ConvertTo-Json -Depth 100 -Compress) -notmatch 'publicIPAddress') 'Workload VM NICs remain private-only'
+$nvaNicsJson = (Get-ResourcesByType $nva 'Microsoft.Network/networkInterfaces') | ConvertTo-Json -Depth 100 -Compress
+Assert-Condition ($nvaNicsJson -notmatch '"publicIPAddress"') 'NVA VM NICs remain private-only'
+Assert-Condition ((Get-ResourcesByType $bastion 'Microsoft.Network/publicIPAddresses').Count -eq 1) 'Azure Bastion public IP is preserved'
 
 Assert-Condition ($frrText -match 'local_asn="\$\{3:-65020\}"') 'FRR defaults to NVA ASN 65020'
 Assert-Condition ($frrText -match 'for attempt in 1 2 3 4 5' -and $frrText -match 'Acquire::Retries=3') 'FRR package installation retries transient repository failures'
@@ -182,6 +241,39 @@ Assert-Condition ($frrText -match '8080' -and $frrText -match 'load_balancer_ip.
 
 Assert-Condition ($wrapperText -match 'account.id -ne \$SubscriptionId') 'Wrapper verifies the exact subscription'
 Assert-Condition ($wrapperText -match 'resourceGroupExists -eq ''true'' -and -not \$ResumeExisting') 'Wrapper refuses existing resource groups by default'
+Assert-Condition ($compiledText -notmatch '(?i)sshSource|ssh.*sourcePrefix') 'Template exposes no caller-supplied SSH source parameter'
+Assert-Condition ($wrapperText -notmatch '(?i)sshSource|discover.*public.*ip|ipify|ifconfig\.me|directSsh') 'Wrapper exposes no direct-SSH switch or public-IP discovery'
+Assert-Condition ($connectivityText -match '/dev/tcp/\$ip/2222' -and $connectivityText -match 'TCP2222.*PASS') 'Live connectivity uses the dedicated TCP/2222 probe path'
+Assert-Condition ($connectivityText -match '/dev/tcp/\$ip/22' -and $connectivityText -match 'SSH22BLOCK.*PASS') 'Live connectivity expects east-west SSH to be blocked'
+Assert-Condition ($connectivityText -match '--retry 2 --retry-all-errors' -and $connectivityText -match '--max-time 30') 'Live HTTPS validation retries transient failures within a bounded timeout'
+Assert-Condition ($listenerText -match 'time\.monotonic\(\) \+ 900' -and $listenerText -match '0\.0\.0\.0", 2222') 'Live TCP listener is bounded and listens only on the validation port'
+
+$wrapperAst = [Management.Automation.Language.Parser]::ParseInput($wrapperText, [ref]$null, [ref]$null)
+$wrapperCommand = Get-Command (Join-Path $root 'deploy-bicep.ps1')
+foreach ($parameterName in 'Location', 'Location2') {
+    $parameterAst = $wrapperAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq $parameterName }
+    $parameterMetadata = $wrapperCommand.Parameters[$parameterName]
+    Assert-Condition ($parameterMetadata.ParameterSets['__AllParameterSets'].IsMandatory -and $null -eq $parameterAst.DefaultValue) "Wrapper requires $parameterName without a default"
+}
+
+# Exercise only argument binding, never the deployment body or Azure commands.
+$bindingScript = [scriptblock]::Create($wrapperAst.ParamBlock.Extent.Text + "`n[pscustomobject]@{Location=`$Location; Location2=`$Location2}")
+foreach ($secondRegion in 'centralus', 'westus3') {
+    $bound = & $bindingScript -SubscriptionId '00000000-0000-0000-0000-000000000000' -Location westus3 -Location2 $secondRegion
+    Assert-Condition ($bound.Location -eq 'westus3' -and $bound.Location2 -eq $secondRegion) "Wrapper preserves explicitly selected regions westus3 / $secondRegion"
+}
+foreach ($parameterName in 'Location', 'Location2') {
+    foreach ($invalidValue in @('', '   ', $null)) {
+        $arguments = @{ SubscriptionId = '00000000-0000-0000-0000-000000000000'; Location = 'westus3'; Location2 = 'centralus' }
+        $arguments[$parameterName] = $invalidValue
+        $rejected = $false
+        try { & $bindingScript @arguments | Out-Null }
+        catch [System.Management.Automation.ParameterBindingException] {
+            $rejected = $_.Exception.ParameterName -eq $parameterName
+        }
+        Assert-Condition $rejected "Wrapper rejects blank $parameterName input before deployment"
+    }
+}
 
 foreach ($file in Get-ChildItem $root -Filter '*.ps1' -Recurse) {
     $tokens = $null
@@ -193,15 +285,40 @@ foreach ($file in Get-ChildItem $root -Filter '*.ps1' -Recurse) {
 $testEnvironment = @{
     VWAN_NVA_BGP_ADMIN_PASSWORD = 'LocalCompilePlaceholderOnly!123'
     VWAN_NVA_BGP_VPN_SHARED_KEY = 'LocalCompilePlaceholderOnly!456'
+    VWAN_NVA_BGP_REGION_1 = 'westus3'
+    VWAN_NVA_BGP_REGION_2 = 'centralus'
 }
+$previousEnvironment = @{}
+$parametersPath = Join-Path $validationDirectory 'parameters.json'
 try {
-    foreach ($name in $testEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $testEnvironment[$name], 'Process') }
-    az bicep build-params --file (Join-Path $root 'main.bicepparam') --outfile (Join-Path $validationDirectory 'parameters.json')
-    Assert-Condition ($LASTEXITCODE -eq 0) 'Bicep parameters compile with synthetic local-only secrets'
+    foreach ($name in $testEnvironment.Keys) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $testEnvironment[$name], 'Process')
+    }
+    foreach ($missingRegion in 'VWAN_NVA_BGP_REGION_1', 'VWAN_NVA_BGP_REGION_2') {
+        Remove-Item "Env:\$missingRegion"
+        $diagnostics = az bicep build-params --file (Join-Path $root 'main.bicepparam') --outfile $parametersPath 2>&1
+        Assert-Condition ($LASTEXITCODE -ne 0 -and ($diagnostics -join "`n") -match $missingRegion) "Bicep parameter compilation rejects missing $missingRegion"
+        [Environment]::SetEnvironmentVariable($missingRegion, $testEnvironment[$missingRegion], 'Process')
+    }
+    foreach ($secondRegion in 'centralus', 'westus3') {
+        [Environment]::SetEnvironmentVariable('VWAN_NVA_BGP_REGION_2', $secondRegion, 'Process')
+        az bicep build-params --file (Join-Path $root 'main.bicepparam') --outfile $parametersPath
+        Assert-Condition ($LASTEXITCODE -eq 0) "Bicep parameters compile with explicit regions westus3 / $secondRegion and synthetic local-only secrets"
+        $compiledParameters = Get-Content $parametersPath -Raw | ConvertFrom-Json
+        Assert-Condition ($compiledParameters.parameters.region1.value -eq 'westus3' -and $compiledParameters.parameters.region2.value -eq $secondRegion) 'Compiled parameters preserve both explicit regions'
+    }
 }
 finally {
-    foreach ($name in $testEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
-    Remove-Item (Join-Path $validationDirectory 'parameters.json') -ErrorAction SilentlyContinue
+    foreach ($name in $previousEnvironment.Keys) {
+        if ($null -eq $previousEnvironment[$name]) {
+            Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
+    }
+    Remove-Item $parametersPath -ErrorAction SilentlyContinue
 }
 
 Write-Host 'Static checks passed. Azure deployment, route convergence, packet paths, and failover remain unverified.'

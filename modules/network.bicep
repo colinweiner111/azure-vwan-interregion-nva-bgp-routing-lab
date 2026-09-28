@@ -8,6 +8,24 @@ param hub2NvaVnetId string
 param hub1NvaLoadBalancerIp string
 param hub2NvaLoadBalancerIp string
 
+var bastionSubnetPrefix = '10.200.0.0/26'
+var labValidationSourcePrefixes = [
+  '10.100.0.0/24'
+  '172.16.1.0/27'
+  '172.16.2.0/27'
+  '172.16.3.0/27'
+  '172.16.4.0/27'
+]
+var hub1WorkloadSubnetPrefixes = [
+  '10.100.0.0/24'
+  '172.16.1.0/27'
+  '172.16.2.0/27'
+]
+var hub2WorkloadSubnetPrefixes = [
+  '172.16.3.0/27'
+  '172.16.4.0/27'
+]
+
 resource hub1NvaVnet 'Microsoft.Network/virtualNetworks@2023-11-01' existing = { name: last(split(hub1NvaVnetId, '/')) }
 resource hub2NvaVnet 'Microsoft.Network/virtualNetworks@2023-11-01' existing = { name: last(split(hub2NvaVnetId, '/')) }
 
@@ -88,8 +106,9 @@ resource nsgHub1 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
   location: location1
   properties: {
     securityRules: [
-      { name: 'allow-bastion-ssh', properties: { priority: 100, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefix: '10.200.0.0/26', sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
-      { name: 'allow-lab-ssh-tests', properties: { priority: 110, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefixes: ['10.100.0.0/24', '172.16.1.0/27', '172.16.2.0/27', '172.16.3.0/27', '172.16.4.0/27'], sourcePortRange: '*', destinationAddressPrefixes: ['10.100.0.0/24', '172.16.1.0/27', '172.16.2.0/27'], destinationPortRange: '22' } }
+      { name: 'allow-bastion-ssh', properties: { priority: 100, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefix: bastionSubnetPrefix, sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
+      { name: 'deny-other-ssh', properties: { priority: 110, direction: 'Inbound', access: 'Deny', protocol: 'Tcp', sourceAddressPrefix: '*', sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
+      { name: 'allow-lab-validation', properties: { priority: 120, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefixes: labValidationSourcePrefixes, sourcePortRange: '*', destinationAddressPrefixes: hub1WorkloadSubnetPrefixes, destinationPortRange: '2222' } }
     ]
   }
 }
@@ -99,8 +118,9 @@ resource nsgHub2 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
   location: location2
   properties: {
     securityRules: [
-      { name: 'allow-bastion-ssh', properties: { priority: 100, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefix: '10.200.0.0/26', sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
-      { name: 'allow-lab-ssh-tests', properties: { priority: 110, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefixes: ['10.100.0.0/24', '172.16.1.0/27', '172.16.2.0/27', '172.16.3.0/27', '172.16.4.0/27'], sourcePortRange: '*', destinationAddressPrefixes: ['172.16.3.0/27', '172.16.4.0/27'], destinationPortRange: '22' } }
+      { name: 'allow-bastion-ssh', properties: { priority: 100, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefix: bastionSubnetPrefix, sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
+      { name: 'deny-other-ssh', properties: { priority: 110, direction: 'Inbound', access: 'Deny', protocol: 'Tcp', sourceAddressPrefix: '*', sourcePortRange: '*', destinationAddressPrefix: '*', destinationPortRange: '22' } }
+      { name: 'allow-lab-validation', properties: { priority: 120, direction: 'Inbound', access: 'Allow', protocol: 'Tcp', sourceAddressPrefixes: labValidationSourcePrefixes, sourcePortRange: '*', destinationAddressPrefixes: hub2WorkloadSubnetPrefixes, destinationPortRange: '2222' } }
     ]
   }
 }
@@ -169,6 +189,7 @@ output hub1RouterIps string[] = hub1.properties.virtualRouterIps
 output hub2RouterIps string[] = hub2.properties.virtualRouterIps
 output branchVnetId string = branchVnet.id
 output bastionVnetId string = bastionVnet.id
+output bastionSubnetPrefix string = bastionSubnetPrefix
 output spoke1Hub1Id string = spoke1Hub1.id
 output spoke2Hub1Id string = spoke2Hub1.id
 output spoke1Hub2Id string = spoke1Hub2.id

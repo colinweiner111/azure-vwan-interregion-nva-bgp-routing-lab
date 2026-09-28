@@ -6,8 +6,14 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$SubscriptionId,
     [string]$ResourceGroupName = 'vwan-interregion-nva-bgp-lab',
-    [string]$Location = 'westus3',
-    [string]$Location2 = 'westus3',
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^\S+$')]
+    [string]$Location,
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^\S+$')]
+    [string]$Location2,
     [string]$AdminUsername = 'azureuser',
     [string]$VmSize = 'Standard_D2ls_v7',
     [System.Security.SecureString]$AdminPassword,

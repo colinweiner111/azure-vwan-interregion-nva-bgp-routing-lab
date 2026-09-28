@@ -1,10 +1,12 @@
 targetScope = 'subscription'
 
 @description('Primary region for deployment')
-param region1 string = 'westus3'
+@minLength(1)
+param region1 string
 
 @description('Region for Hub 2 resources')
-param region2 string = 'westus3'
+@minLength(1)
+param region2 string
 
 @description('Resource group name')
 param resourceGroupName string = 'vwan-interregion-nva-bgp-lab'
@@ -145,6 +147,7 @@ module bastion 'modules/bastion.bicep' = {
     location: region1
     hub1Id: network.outputs.hub1Id
     bastionVnetId: network.outputs.bastionVnetId
+    bastionSubnetPrefix: network.outputs.bastionSubnetPrefix
     hub1PrivateRouteTableId: routing.outputs.hub1PrivateRouteTableId
     hub1DefaultRouteTableId: routing.outputs.hub1DefaultRouteTableId
   }
